@@ -13,6 +13,7 @@ from math import sqrt
 import os
 
 import numpy as np
+import pandas as pd
 
 import PIL
 from PIL import Image, ImageDraw, ImageFilter
@@ -20,10 +21,13 @@ from PIL import Image, ImageDraw, ImageFilter
 import skimage
 import skimage.io
 import skimage.measure
+from sklearn.cluster import KMeans, SpectralClustering, AffinityPropagation, MeanShift, DBSCAN, estimate_bandwidth
 
 import shapely
 import shapely.geometry
 from shapely.geometry import Polygon
+
+import matplotlib.pyplot as plt
 
 # Notes
 # cls -- sea lion class
@@ -160,6 +164,11 @@ class SeaLionData(object):
             self._counts = counts
         return self._counts
 
+    @property
+    def pd_counts(self):
+        """pandas datafram of train.csv"""
+        return pd.read_csv(self.path('counts'))
+
     def rmse(self, tid_counts) :
         true_counts = self.counts
 
@@ -175,14 +184,23 @@ class SeaLionData(object):
         rmse = np.sqrt(error).sum() / 5
         return rmse
 
+    def load_train(self, tids, target_size=(299, 299)):
+        """Return train dataset as numpy array
 
-    def load_train_image(self, train_id, border=0, mask=False):
+        target_size -- The size to resize each image
+        """
+        X = np.empty((len(tids), target_size[0], target_size[1], 3))
+        for i, tid in enumerate(tids):
+            X[i] = load_train_image(tid, target_size=target_size)
+        return X
+
+    def load_train_image(self, train_id, border=0, mask=False, target_size=None):
         """Return image as numpy array
 
         border -- add a black border of this width around image
         mask -- If true mask out masked areas from corresponding dotted image
         """
-        img = self._load_image('train', train_id, border)
+        img = self._load_image('train', train_id, border, target_size=target_size)
         if mask :
             # The masked areas are not uniformly black, presumable due to
             # jpeg compression artifacts
@@ -200,9 +218,12 @@ class SeaLionData(object):
         return self._load_image('test', test_id, border)
 
 
-    def _load_image(self, itype, tid, border=0) :
+    def _load_image(self, itype, tid, border=0, target_size=None) :
         fn = self.path(itype, tid=tid)
-        img = np.asarray(Image.open(fn))
+        img = Image.open(fn)
+        if target_size is not None:
+            img = img.resize((target_size[1], target_size[0]))
+        img = np.asarray(img)
         if border :
             height, width, channels = img.shape
             bimg = np.zeros( shape=(height+border*2, width+border*2, channels), dtype=np.uint8)
@@ -279,6 +300,37 @@ class SeaLionData(object):
             Image.fromarray(img).save(fn)
 
         return sealions
+
+    def sealion_kmeans(self, sealions, n_clusters=3):
+        # Initialize the  numpy array to hold the coordinates
+        pts = np.empty((len(sealions), 2))
+        prev_tid = None
+        i = 0
+        for tid, cls, x, y in sealions:
+            if prev_tid is not None and prev_tid != tid:
+                # We're done loading all the coordinates for the image
+                # Run KMeans
+                pts = pts[:i]
+                y_pred = KMeans(n_clusters).fit_predict(pts)
+                plt.scatter(pts[:, 0], pts[:, 1], c=y_pred)
+                plt.title('KMeans Image %s' % tid)
+                plt.show()
+
+                y_pred = MeanShift().fit_predict(pts)
+                plt.scatter(pts[:, 0], pts[:, 1], c=y_pred)
+                plt.title('MeanShift Image {} with Bandwith {}'.format(tid, estimate_bandwidth(pts)))
+                plt.show()
+
+                # Reset the pts
+                pts = np.empty((len(sealions), 2))
+                prev_tid = None
+                i = 0
+
+            print((tid, cls, x, y))
+            pts[i] = np.array([x, y]).astype(np.float64)
+            i += 1
+            prev_tid = tid
+
 
     def regions(self, sealions, border=0):
         img_lions = defaultdict(list)
@@ -388,15 +440,16 @@ class SeaLionData(object):
 
 # end SeaLionData
 
-
-# Count sea lion dots and compare to truth from train.csv
-sld = SeaLionData()
-sld.verbosity = VERBOSITY.VERBOSE
-# for tid in sld.trainshort_ids:
-    # coord = sld.coords(tid)
-# sld.save_coords(train_ids = sld.trainshort_ids)
-coords = sld.load_coords()
-regions = sld.regions(coords, border=32)
-# sld.save_region_boxes(regions=regions)
-yolo_regions = sld.yolo_convert(regions)
-sld.yolo_files(yolo_regions)
+if __name__ == "__main__":
+    # Count sea lion dots and compare to truth from train.csv
+    sld = SeaLionData()
+    sld.verbosity = VERBOSITY.VERBOSE
+    # for tid in sld.trainshort_ids:
+        # coord = sld.coords(tid)
+    # sld.save_coords(train_ids = sld.trainshort_ids)
+    coords = sld.load_coords()
+    # regions = sld.regions(coords, border=32)
+    # sld.save_region_boxes(regions=regions)
+    # yolo_regions = sld.yolo_convert(regions)
+    # sld.yolo_files(yolo_regions)
+    sld.sealion_kmeans(coords, 2)
