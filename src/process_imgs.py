@@ -445,6 +445,10 @@ class SeaLionData(object):
             fn = 'sealions_submission_%s.csv' % now
         sub.to_csv(fn, index_label='test_id')
 
+        if sld.verbosity >= VERBOSITY.VERBOSE:
+            print("Finished writing submission for Kaggle to %s" % fn)
+
+
 
     def _progress(self, string=None, end=' ', verbosity=VERBOSITY.NORMAL):
         if self.verbosity < verbosity: return
