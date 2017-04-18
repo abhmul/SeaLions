@@ -11,6 +11,7 @@ import glob
 import csv
 from math import sqrt
 import os
+import datetime
 
 import numpy as np
 import pandas as pd
@@ -426,6 +427,23 @@ class SeaLionData(object):
             Image.fromarray( img[y:y+chunksize, x:x+chunksize, :]).save(fn)
             self._progress()
         self._progress('done')
+
+    def create_submission(self, preds, fn=None, classes=['adult_males','subadult_males','adult_females','juveniles,pups']):
+        """
+        Turns predictions from Keras into a csvfile for submission to kaggle
+
+        fn -- the filename to save to, will default to the string
+              'sealions_submission_[NOW].csv' where NOW is the current date and
+              time.
+        classes -- The columns of the csvfile in the specified order. You should
+                   change the order if some columns got mixed up.
+        """
+
+        sub = pd.DataFrame(data=preds, columns=classes)
+        if fn is None:
+            now = str(datetime.datetime.now()).replace(' ', '-')
+            fn = 'sealions_submission_%s.csv' % now
+        sub.to_csv(fn, index_label='test_id')
 
 
     def _progress(self, string=None, end=' ', verbosity=VERBOSITY.NORMAL):
