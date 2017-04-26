@@ -2,6 +2,7 @@
 
 https://www.kaggle.com/c/noaa-fisheries-steller-sea-lion-population-count
 """
+from __future__ import print_function
 
 import sys
 import os
@@ -11,7 +12,6 @@ import glob
 import csv
 from math import sqrt
 import os
-import datetime
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,8 @@ import shapely.geometry
 from shapely.geometry import Polygon
 
 import matplotlib.pyplot as plt
+
+
 
 # Notes
 # cls -- sea lion class
@@ -347,11 +349,36 @@ class SeaLionData(object):
                           max(pt[1] for pt in img_lions[tid]) + border))
         return bboxes
 
-    def yolo_convert(self, bboxes):
 
+    # Creates boxes for individual sea lions
+    def create_bboxes(self, sealions, border=0):
+        img_lions = defaultdict(list)
+        for tid, cls, x, y in sealions:
+            img_lions[tid].append((x, y))
+
+        bboxes = []
+        for tid in img_lions.keys():
+            for x,y in img_lions[tid]:
+
+                bboxes.append(BoundingBox(
+                            tid,
+                            x - border,
+                            y - border,
+                            x + border,
+                            y + border
+                            ))
+        return bboxes
+
+
+
+
+    def yolo_convert(self, bboxes):
+        prev_tid = None
         yolo_boxes = []
         for tid, x1, y1, x2, y2 in bboxes:
-            img = self.load_train_image(tid, mask=False)
+            if tid != prev_tid:
+                img = self.load_train_image(tid, mask=False)
+
             dh, dw, tmp = img.shape
             xr = (x2 + x1) / (2. * dw)
             yr = (y2 + y1) / (2. * dh)
@@ -360,14 +387,17 @@ class SeaLionData(object):
             hr = (y2 - y1) / float(dh)
             hr = min(hr, (1 - yr) * 2, 2 * yr) # cut the height if too big
             yolo_boxes.append(YoloBox(tid, xr, yr, wr, hr))
+            prev_tid = tid
+
         return yolo_boxes
 
     def yolo_files(self, yolo_boxes):
 
         with open('training_list.txt', 'w') as file_list:
             for tid, xr, yr, wr, hr in sorted(yolo_boxes):
-                with open('%s.txt' % tid, 'w') as blist:
+                with open('%s.txt' % tid, 'a') as blist:
                     print(' '.join(('0', str(xr), str(yr), str(wr), str(hr))), file=blist)
+                
                 print(self.path('train', tid=tid), file=file_list)
 
 
@@ -428,27 +458,6 @@ class SeaLionData(object):
             self._progress()
         self._progress('done')
 
-    def create_submission(self, preds, fn=None, classes=['adult_males','subadult_males','adult_females','juveniles,pups']):
-        """
-        Turns predictions from Keras into a csvfile for submission to kaggle
-
-        fn -- the filename to save to, will default to the string
-              'sealions_submission_[NOW].csv' where NOW is the current date and
-              time.
-        classes -- The columns of the csvfile in the specified order. You should
-                   change the order if some columns got mixed up.
-        """
-
-        sub = pd.DataFrame(data=preds, columns=classes)
-        if fn is None:
-            now = str(datetime.datetime.now()).replace(' ', '-')
-            fn = 'sealions_submission_%s.csv' % now
-        sub.to_csv(fn, index_label='test_id')
-
-        if sld.verbosity >= VERBOSITY.VERBOSE:
-            print("Finished writing submission for Kaggle to %s" % fn)
-
-
 
     def _progress(self, string=None, end=' ', verbosity=VERBOSITY.NORMAL):
         if self.verbosity < verbosity: return
@@ -468,10 +477,10 @@ if __name__ == "__main__":
     sld.verbosity = VERBOSITY.VERBOSE
     # for tid in sld.trainshort_ids:
         # coord = sld.coords(tid)
-    # sld.save_coords(train_ids = sld.trainshort_ids)
+    #sld.save_coords(train_ids = sld.trainshort_ids)
     coords = sld.load_coords()
-    # regions = sld.regions(coords, border=32)
+    regions = sld.create_bboxes(coords, border=32)
     # sld.save_region_boxes(regions=regions)
-    # yolo_regions = sld.yolo_convert(regions)
-    # sld.yolo_files(yolo_regions)
-    sld.sealion_kmeans(coords, 2)
+    yolo_regions = sld.yolo_convert(regions)
+    sld.yolo_files(yolo_regions)
+    #sld.sealion_kmeans(coords, 2)
