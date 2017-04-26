@@ -28,6 +28,8 @@ import shapely
 import shapely.geometry
 from shapely.geometry import Polygon
 
+from tqdm import tqdm
+
 import matplotlib.pyplot as plt
 
 
@@ -111,13 +113,17 @@ class SeaLionData(object):
 
         self.paths = {
             # Source paths
-            'sample'     : os.path.join(sourcedir, 'sample_submission.csv'),
-            'counts'     : os.path.join(sourcedir, 'Train', 'train.csv'),
-            'train'      : os.path.join(sourcedir, 'Train', '{tid}.jpg'),
-            'dotted'     : os.path.join(sourcedir, 'TrainDotted', '{tid}.jpg'),
-            'test'       : os.path.join(sourcedir, 'Test', '{tid}.jpg'),
+            'sample'        : os.path.join(sourcedir, 'sample_submission.csv'),
+            'counts'        : os.path.join(sourcedir, 'Train', 'train.csv'),
+            'train'         : os.path.join(sourcedir, 'Train', '{tid}.jpg'),
+            'chip_train'    : os.path.join(sourcedir, 'ChipTrain', '{tid}.jpg'),
+            'dotted'        : os.path.join(sourcedir, 'TrainDotted', '{tid}.jpg'),
+            'test'          : os.path.join(sourcedir, 'Test', '{tid}.jpg'),
+            'yolo_boxes'    : os.path.join(sourcedir, 'Train', '{tid}.txt'),
+            'train_list' : os.path.join(sourcedir, 'Train', 'train_list.txt'),
             # Data paths
-            'coords'     : os.path.join(datadir, 'coords.csv'),
+            'coords'        : os.path.join(sourcedir, 'Train', 'coords.csv'),
+            'chunk_coords'  : os.path.join(sourcedir, 'ChipTrain', 'coords.csv')
             }
 
         # From MismatchedTrainImages.txt
@@ -197,13 +203,13 @@ class SeaLionData(object):
             X[i] = load_train_image(tid, target_size=target_size)
         return X
 
-    def load_train_image(self, train_id, border=0, mask=False, target_size=None):
+    def load_train_image(self, train_id, border=0, mask=False, arr=True, target_size=None):
         """Return image as numpy array
 
         border -- add a black border of this width around image
         mask -- If true mask out masked areas from corresponding dotted image
         """
-        img = self._load_image('train', train_id, border, target_size=target_size)
+        img = self._load_image('train', train_id, border, arr, target_size=target_size)
         if mask :
             # The masked areas are not uniformly black, presumable due to
             # jpeg compression artifacts
@@ -213,20 +219,28 @@ class SeaLionData(object):
         return img
 
 
-    def load_dotted_image(self, train_id, border=0):
-        return self._load_image('dotted', train_id, border)
+    def load_dotted_image(self, train_id, border=0, arr=True):
+        return self._load_image('dotted', train_id, border, arr)
 
 
-    def load_test_image(self, test_id, border=0):
-        return self._load_image('test', test_id, border)
+    def load_test_image(self, test_id, border=0, arr=True):
+        return self._load_image('test', test_id, border, arr)
 
 
-    def _load_image(self, itype, tid, border=0, target_size=None) :
+    def _load_image(self, itype, tid, border=0, arr=True, target_size=None) :
+
+        if border != 0 and not arr:
+            raise ValueError("Cannot apply border technique to a non array")
+
         fn = self.path(itype, tid=tid)
         img = Image.open(fn)
+
         if target_size is not None:
             img = img.resize((target_size[1], target_size[0]))
-        img = np.asarray(img)
+
+        if arr:
+            img = np.asarray(img)
+
         if border :
             height, width, channels = img.shape
             bimg = np.zeros( shape=(height+border*2, width+border*2, channels), dtype=np.uint8)
@@ -335,30 +349,25 @@ class SeaLionData(object):
             prev_tid = tid
 
 
-    def regions(self, sealions, border=0):
-        img_lions = defaultdict(list)
-        for tid, cls, x, y in sealions:
-            img_lions[tid].append((x, y))
+    def regions(self, img_lions, border=0):
 
         bboxes = []
         for tid in img_lions.keys():
             bboxes.append(BoundingBox(tid,
-                          min(pt[0] for pt in img_lions[tid]) - border,
-                          min(pt[1] for pt in img_lions[tid]) - border,
-                          max(pt[0] for pt in img_lions[tid]) + border,
-                          max(pt[1] for pt in img_lions[tid]) + border))
+                          min(pt.x for pt in img_lions[tid]) - border,
+                          min(pt.y for pt in img_lions[tid]) - border,
+                          max(pt.x for pt in img_lions[tid]) + border,
+                          max(pt.y for pt in img_lions[tid]) + border))
         return bboxes
 
 
     # Creates boxes for individual sea lions
-    def create_bboxes(self, sealions, border=0):
-        img_lions = defaultdict(list)
-        for tid, cls, x, y in sealions:
-            img_lions[tid].append((x, y))
-
+    def create_bboxes(self, img_lions, border=0):
         bboxes = []
+        print("Creating bounding boxes")
         for tid in img_lions.keys():
-            for x,y in img_lions[tid]:
+            for tid2, cls, x, y in img_lions[tid]:
+                assert(tid == tid2)
 
                 bboxes.append(BoundingBox(
                             tid,
@@ -367,15 +376,101 @@ class SeaLionData(object):
                             x + border,
                             y + border
                             ))
+                if self.verbosity == VERBOSITY.DEBUG:
+                    img = self.load_train_image(tid, mask=False)
+                    bbox = bboxes[-1]
+                    fn = 'crop_{}_{}.png'.format(bboxes[-1], tid)
+                    print('Saving a bbox for %s' % tid)
+                    Image.fromarray(img[bbox.y1:bbox.y2, bbox.x1:bbox.x2]).save(fn)
+
         return bboxes
 
+
+    def normalize_coords(self, sealions, w, h):
+        normed = [SeaLionCoord(tid, cls, x / float(w), y / float(h)) for tid, cls, x, y in sealions]
+
+        if self.verbosity == VERBOSITY.DEBUG:
+            # print("Verifying that all the normed coords have the same tid")
+            tid = 0
+            if len(normed) > 0:
+                tid = normed[0].tid
+            assert(all(tid == l.tid for l in normed))
+            assert(all(0 <= l.x <= 1 and 0 <= l.y <= 1 for l in normed))
+
+        return normed
+
+    def grid_images(self, img_lions, grid=256, save=True):
+
+        fn = self.path('chunk_coords')
+        with open(fn, 'w') as csvfile:
+            # Write the column names
+            writer = csv.writer(csvfile)
+            writer.writerow( SeaLionCoord._fields )
+
+            for tid in tqdm(img_lions.keys()):
+                if self.verbosity == VERBOSITY.DEBUG:
+                    print("Gridding image %s" % tid)
+
+                img = self.load_train_image(tid, 0, mask=False, arr=False)
+                sealions = img_lions[tid]
+                w, h = img.size
+                if self.verbosity == VERBOSITY.DEBUG:
+                    print("\tOriginal Image size: w-%s, h-%s" % (w, h))
+                normed = self.normalize_coords(sealions, w, h)
+
+                # Resize the image to the next multiple of "grid"
+                img = img.resize((w - w % grid + grid, h - h % grid + grid))
+                w, h = img.size
+                if self.verbosity == VERBOSITY.DEBUG:
+                    print("\tNew Image size: w-%s, h-%s" % (w, h))
+                sealions = [SeaLionCoord(tid, cls, int(round(x * w)), int(round(y * h))) for tid, cls, x, y in normed]
+
+                # Plot the locations of the coordinates
+                dots = np.zeros((h, w))
+
+                if self.verbosity == VERBOSITY.DEBUG:
+                    print("\tShape of dots: w-%s h-%s" % (dots.shape[1], dots.shape[0]))
+
+                class_inds = defaultdict(list)
+                for tid, cls, x, y in sealions:
+
+                    if self.verbosity == VERBOSITY.DEBUG:
+                        assert(0 <= y < h and 0 <= x < w)
+
+                    class_inds[cls].append((y, x))
+                for cls in class_inds.keys():
+                    # Could throw an index out of bounds error
+                    # print("\t", list(zip(*class_inds[cls])))
+                    dots[list(zip(*class_inds[cls]))] = cls + 1
+
+                # Now create the chunks
+                for x_start in range(0, w, grid):
+                    x_bnd = x_start + grid
+                    for y_start in range(0, h, grid):
+                        y_bnd = y_start + grid
+                        # Get the new coordinates
+                        new_tid = '_'.join(str(n) for n in (tid, int(x_start / grid), int(y_start / grid)))
+                        # print("\t\tNew Tid: %s" % new_tid)
+                        for cls in self.cls:
+                            inds = list(zip(*np.where(dots[y_start:y_bnd, x_start:x_bnd] == cls + 1)))
+
+                            for x, y in inds:
+                                # Write the row to the coords csv file
+                                new_row = [new_tid, cls, x, y]
+                                writer.writerow(new_row)
+
+
+                        # Save the chunk
+                        chunk = img.crop((x_start, y_start, x_bnd, y_bnd))
+                        chunk.save(self.path('chip_train' ,tid=new_tid))
 
 
 
     def yolo_convert(self, bboxes):
         prev_tid = None
         yolo_boxes = []
-        for tid, x1, y1, x2, y2 in bboxes:
+        if self.verbosity >= VERBOSITY.NORMAL: print("Converting to YOLO boxes")
+        for tid, x1, y1, x2, y2 in tqdm(bboxes):
             if tid != prev_tid:
                 img = self.load_train_image(tid, mask=False)
 
@@ -393,12 +488,14 @@ class SeaLionData(object):
 
     def yolo_files(self, yolo_boxes):
 
-        with open('training_list.txt', 'w') as file_list:
+        prev_tid = None
+        with open(self.path('train_list'), 'w') as file_list:
             for tid, xr, yr, wr, hr in sorted(yolo_boxes):
-                with open('%s.txt' % tid, 'a') as blist:
+                with open(self.path('yolo_boxes', tid=tid), 'a') as blist:
                     print(' '.join(('0', str(xr), str(yr), str(wr), str(hr))), file=blist)
-                
-                print(self.path('train', tid=tid), file=file_list)
+
+                if tid != prev_tid:
+                    print(self.path('train', tid=tid), file=file_list)
 
 
     def save_coords(self, train_ids=None):
@@ -424,7 +521,12 @@ class SeaLionData(object):
             field_row = next(coord_reader)
             for row in coord_reader:
                 sealions.append(SeaLionCoord(*[int(v) for v in row]))
-        return sealions
+
+        img_lions = defaultdict(list)
+        for tid, cls, x, y in sealions:
+            img_lions[tid].append(SeaLionCoord(tid, cls, x, y))
+
+        return img_lions
 
     def save_region_boxes(self, regions):
         self._progress('Saving image chunks...')
@@ -479,8 +581,10 @@ if __name__ == "__main__":
         # coord = sld.coords(tid)
     #sld.save_coords(train_ids = sld.trainshort_ids)
     coords = sld.load_coords()
-    regions = sld.create_bboxes(coords, border=32)
+    sld.grid_images(coords)
+
+    # regions = sld.create_bboxes(coords, border=48)
     # sld.save_region_boxes(regions=regions)
-    yolo_regions = sld.yolo_convert(regions)
-    sld.yolo_files(yolo_regions)
+    # yolo_regions = sld.yolo_convert(regions)
+    # sld.yolo_files(yolo_regions)
     #sld.sealion_kmeans(coords, 2)
